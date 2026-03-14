@@ -1,4 +1,22 @@
-let downloadPollInterval;
+// Native Messaging version - uses native messaging instead of HTTP
+// This file replaces popup.js when using native messaging
+
+document.addEventListener("DOMContentLoaded", async () => {
+    const { pendingDownload } = await chrome.storage.local.get("pendingDownload");
+    
+    if (!pendingDownload) {
+        document.getElementById("diskInfo").innerHTML = '<div class="loading">No pending download.</div>';
+        document.getElementById("confirm").disabled = true;
+        document.getElementById("cancel").disabled = true;
+        return;
+    }
+
+    // Clear badge when popup opens
+    chrome.action.setBadgeText({ text: "" });
+
+    const fileSizeMB = pendingDownload.fileSize > 0 ?
+        (pendingDownload.fileSize / (1024 * 1024)).toFixed(2) :
+        "Unknown";
 
 document.addEventListener("DOMContentLoaded", async () => {
     // Attempt to find a recent active download to guess the current download path
@@ -19,11 +37,60 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Clear badge when popup opens
     try { chrome.action.setBadgeText({ text: "" }); } catch (e) { }
 
-    // Load disk info (non-blocking)
-    loadDiskInfo(defaultPath);
+        const sizeBytes = inputValue * 1024 * 1024;
 
-    // Start polling for active downloads
-    startDownloadPolling();
+        try {
+            const data = await sendNativeMessage('check', {
+                size: sizeBytes,
+                path: storedDownloadPath
+            });
+            
+            if (!data.ok) {
+                showError(`Not enough space! ${data.error}`);
+                try {
+                    await chrome.downloads.cancel(pendingDownload.id);
+                } catch (err) {
+                    console.error("Error canceling download:", err);
+                }
+            } else {
+                try {
+                    await chrome.downloads.resume(pendingDownload.id);
+                    // Refresh disk info to show updated space
+                    await loadDiskInfo(storedDownloadPath);
+                    // Close after a brief delay to show updated info
+                    setTimeout(() => {
+                        chrome.storage.local.remove("pendingDownload");
+                        window.close();
+                    }, 1000);
+                } catch (err) {
+                    console.error("Error resuming download:", err);
+                    showError("Could not resume download. Please check manually.");
+                }
+            }
+        } catch (err) {
+            console.error("Error checking space:", err);
+            showError("Failed to contact native host. Make sure the native host is installed correctly.");
+            try {
+                await chrome.downloads.cancel(pendingDownload.id);
+            } catch (cancelErr) {
+                console.error("Error canceling download:", cancelErr);
+            }
+            setTimeout(() => {
+                chrome.storage.local.remove("pendingDownload");
+                window.close();
+            }, 2000);
+        }
+    };
+
+    document.getElementById("cancel").onclick = async () => {
+        try {
+            await chrome.downloads.cancel(pendingDownload.id);
+        } catch (err) {
+            console.error("Error canceling download:", err);
+        }
+        await chrome.storage.local.remove("pendingDownload");
+        window.close();
+    };
 });
 
 // ---------- Disk Info ----------
@@ -33,13 +100,10 @@ async function loadDiskInfo(path) {
     diskInfoDiv.innerHTML = '<div class="loading">Loading disk space...</div>';
 
     try {
-        const data = await chrome.runtime.sendNativeMessage(
-            'com.storagemanager.app',
-            { action: 'info', path: path }
-        );
-
-        if (!data || !data.ok) {
-            throw new Error((data && data.error) || "Failed to get disk info");
+        const data = await sendNativeMessage('info', { path: path });
+        
+        if (!data.ok) {
+            throw new Error(data.error || "Failed to get disk info");
         }
 
         const percentUsed = data.percent_used;
@@ -95,13 +159,38 @@ async function loadDiskInfo(path) {
         diskInfoDiv.innerHTML = `
             <div class="loading" style="color: #c05050;">
                 ⚠️ Could not load disk space info.<br>
-                <small>Make sure the native messaging host is installed</small>
+                <small>Make sure native host is installed</small>
             </div>
         `;
     }
 }
 
-// ---------- Error Display ----------
+function sendNativeMessage(command, params = {}) {
+    return new Promise((resolve, reject) => {
+        const message = {
+            command: command,
+            ...params
+        };
+
+        chrome.runtime.sendNativeMessage('com.storage_checker', message, (response) => {
+            if (chrome.runtime.lastError) {
+                reject(new Error(chrome.runtime.lastError.message || 'Native host connection failed'));
+                return;
+            }
+            
+            if (!response) {
+                reject(new Error('No response from native host'));
+                return;
+            }
+            
+            if (response.ok === false) {
+                reject(new Error(response.error || 'Unknown error'));
+            } else {
+                resolve(response);
+            }
+        });
+    });
+}
 
 function showError(message) {
     const errorDiv = document.getElementById("errorMessage");
@@ -321,3 +410,4 @@ async function renderDownloads() {
 
     isRendering = false;
 }
+

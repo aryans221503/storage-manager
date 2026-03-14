@@ -5,7 +5,9 @@ chrome.downloads.onCreated.addListener(async (item) => {
     console.log("Download started:", item);
 
     try {
-        checkingDownloads.add(item.id);
+        // Pause the download immediately - simple approach like Flask version
+        await chrome.downloads.pause(item.id);
+        console.log("Download paused successfully:", item.id);
 
         // Pause the download immediately
         await chrome.downloads.pause(item.id);
@@ -20,11 +22,16 @@ chrome.downloads.onCreated.addListener(async (item) => {
             chrome.action.setBadgeBackgroundColor({ color: "#f44336" });
         }
     } catch (error) {
-        // If pause fails, just log it — do NOT cancel the download
-        // The download will continue normally and the user can manage it from the popup
-        console.warn("Could not auto-pause download:", item.id, error);
-        chrome.action.setBadgeText({ text: "!" });
-        chrome.action.setBadgeBackgroundColor({ color: "#f44336" });
+        // Handle "must be in progress" error gracefully - this happens when download
+        // completes or is interrupted before we can pause it
+        const errorMsg = error.message || error.toString() || String(error);
+        if (errorMsg.includes('must be in progress') || errorMsg.includes('Download must be in progress')) {
+            console.log("Download not in progress (completed or interrupted), skipping");
+            return;
+        }
+        
+        // For other errors, log but don't cancel
+        console.error("Error pausing download:", error);
     }
 });
 
